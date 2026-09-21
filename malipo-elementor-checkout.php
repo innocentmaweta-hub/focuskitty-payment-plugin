@@ -603,11 +603,44 @@ class OneKhusa_Elementor_Checkout {
         if ($code < 200 || $code >= 300) {
             update_post_meta($post_id, 'status', 'Error');
 
+            // Keep the raw response in the order for troubleshooting, but expose a
+            // concise diagnostic to the browser while testing so we can see exactly
+            // why OneKhusa rejected the RTP request.
             $message = !empty($body['message'])
                 ? sanitize_text_field($body['message'])
-                : 'OneKhusa could not initiate the payment request.';
+                : (!empty($body['responseMessage'])
+                    ? sanitize_text_field($body['responseMessage'])
+                    : 'OneKhusa could not initiate the payment request.');
 
-            return new WP_Error('onekhusa_error', $message, ['status' => 502]);
+            $response_code = !empty($body['responseCode'])
+                ? sanitize_text_field($body['responseCode'])
+                : (!empty($body['code']) ? sanitize_text_field($body['code']) : '');
+
+            $detail = 'OneKhusa RTP failed (HTTP ' . (int)$code . ')';
+            if ($response_code) {
+                $detail .= ' [' . $response_code . ']';
+            }
+            $detail .= ': ' . $message;
+
+            // Include a compact response preview when OneKhusa did not provide a
+            // standard message/code. This is deliberately truncated to avoid dumping
+            // a large response into the public browser.
+            if (!$response_code && empty($body['message']) && empty($body['responseMessage']) && $raw) {
+                $preview = sanitize_text_field(wp_strip_all_tags($raw));
+                if ($preview) {
+                    $detail .= ' | Response: ' . mb_substr($preview, 0, 500);
+                }
+            }
+
+            return new WP_Error(
+                'onekhusa_error',
+                $detail,
+                [
+                    'status' => 502,
+                    'onekhusa_http_code' => (int)$code,
+                    'onekhusa_response_code' => $response_code,
+                ]
+            );
         }
 
         // Keep the merchant reference as the primary correlation value. If OneKhusa
