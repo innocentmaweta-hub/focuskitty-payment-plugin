@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: OneKhusa Checkout for Elementor
- * Description: OneKhusa Request To Pay mobile-money integration for Elementor/WordPress without WooCommerce.
- * Version: 3.0.0
+ * Description: OneKhusa Hosted Checkout integration for Elementor/WordPress without WooCommerce.
+ * Version: 4.0.0
  * Author: Custom Integration
  */
 
@@ -95,9 +95,8 @@ class OneKhusa_Elementor_Checkout {
         <div class="wrap">
             <h1>OneKhusa Request To Pay</h1>
             <p>
-                Direct OneKhusa Request To Pay integration: customer enters their mobile number and network,
-                FocusKitty initiates the payment request, the customer confirms on their phone, and the webhook
-                updates the order to Paid or Failed. No WooCommerce is required.
+                OneKhusa Hosted Checkout integration: FocusKitty creates the payment request, redirects the customer
+                to OneKhusa's secure hosted checkout, and the webhook updates the order to Paid or Failed. No WooCommerce is required.
             </p>
 
             <form method="post" action="options.php">
@@ -232,7 +231,7 @@ class OneKhusa_Elementor_Checkout {
             <p><strong>Product page:</strong> <code>[onekhusa_buy product="tummy-tonic"]</code></p>
             <p><strong>Checkout page:</strong> <code>[onekhusa_checkout]</code></p>
             <p><strong>Success/status page:</strong> <code>[onekhusa_order_status]</code></p>
-            <p><strong>Payment flow:</strong> Phone + mobile network → Request To Pay → customer confirms on phone → webhook → Paid/Failed.</p>
+            <p><strong>Payment flow:</strong> Customer details → OneKhusa Hosted Checkout → customer selects a supported payment method → webhook → Paid/Failed.</p>
 
             <h2>OneKhusa Webhook URL</h2>
             <p><code><?php echo esc_html($webhook); ?></code></p>
@@ -445,7 +444,7 @@ class OneKhusa_Elementor_Checkout {
                 return;
             }
 
-            msg.textContent = 'Sending payment request to your phone...';
+            msg.textContent = 'Preparing secure payment checkout...';
             msg.className = 'okec-msg';
             button.disabled = true;
 
@@ -468,14 +467,13 @@ class OneKhusa_Elementor_Checkout {
                     throw new Error(data.message || 'Could not start the payment request.');
                 }
 
-                msg.textContent = data.message || 'Payment request sent. Please check your phone and confirm the payment.';
+                msg.textContent = data.message || 'Redirecting you to secure payment checkout...';
                 msg.className = 'okec-msg okec-success';
 
-                button.textContent = 'Payment Request Sent';
-                button.disabled = true;
-
-                if(data.status_url){
-                    window.setTimeout(function(){ window.location.href = data.status_url; }, 2500);
+                if(data.checkout_url){
+                    window.location.href = data.checkout_url;
+                } else {
+                    throw new Error('OneKhusa did not return a checkout URL.');
                 }
             }).catch(err => {
                 msg.textContent = err.message;
@@ -544,47 +542,50 @@ class OneKhusa_Elementor_Checkout {
         update_post_meta($post_id, 'delivery_address', $address);
         update_post_meta($post_id, 'status', 'Pending');
 
-        $connector_id = 0;
-        if (strtolower($network) === 'airtel') {
-            $connector_id = absint($s['airtel_connector_id'] ?? 0);
-        } elseif (strtolower($network) === 'tnm') {
-            $connector_id = absint($s['tnm_connector_id'] ?? 0);
-        }
-
-        if (!$connector_id) {
-            update_post_meta($post_id, 'status', 'Error');
-            return new WP_Error(
-                'onekhusa_connector',
-                'The selected mobile network connector is not configured.',
-                ['status' => 500]
-            );
-        }
-
         $idempotency_key = 'FK-' . wp_generate_uuid4();
+        $source_reference = 'FKR' . gmdate('YmdHis') . wp_rand(100, 999);
 
-        // OneKhusa's current Request To Pay Initiate endpoint expects these
-        // fields at the JSON root. It does NOT use an "input" wrapper, customer
-        // mobile number, or connectorId on this endpoint.
-        // referenceNumber must be 5-25 alphanumeric characters.
-        $reference_number = 'FKR' . gmdate('YmdHis') . wp_rand(100, 999);
-        $captured_by = sanitize_email(get_option('admin_email'));
+        $success_url = add_query_arg(
+            'onekhusa_order',
+            $order_id,
+            $this->success_page()
+        );
+        $failure_url = add_query_arg(
+            [
+                'onekhusa_order' => $order_id,
+                'payment_failed' => '1',
+            ],
+            $this->success_page()
+        );
+        $callback_url = rest_url('onekhusa/v1/webhook');
 
         $payload = [
-            'merchantAccountNumber' => (int)$s['merchant_account'],
-            'transactionAmount' => $amount,
-            'transactionDescription' => 'FocusKitty - ' . $product['name'] . ' x ' . $quantity,
-            'referenceNumber' => $reference_number,
-            'capturedBy' => $captured_by,
+            'authentication' => [
+                'apiKey' => $s['api_key'],
+                'apiSecret' => $s['api_secret'],
+            ],
+            'merchant' => [
+                'organisationId' => $s['organisation_id'],
+                'merchantAccountNumber' => (int)$s['merchant_account'],
+            ],
+            'payment' => [
+                'sourceReferenceNumber' => $source_reference,
+                'description' => 'FocusKitty - ' . $product['name'] . ' x ' . $quantity,
+                'amount' => $amount,
+            ],
+            'route' => [
+                'successRedirectionUrl' => $success_url,
+                'failureRedirectionUrl' => $failure_url,
+                'callbackApiUrl' => $callback_url,
+            ],
         ];
 
-        update_post_meta($post_id, 'connector_id', $connector_id);
         update_post_meta($post_id, 'network', strtolower($network));
         update_post_meta($post_id, 'idempotency_key', $idempotency_key);
-        update_post_meta($post_id, 'onekhusa_reference_number', $reference_number);
-        update_post_meta($post_id, 'captured_by', $captured_by);
+        update_post_meta($post_id, 'onekhusa_reference_number', $source_reference);
 
         $response = wp_remote_post(
-            $this->base_url() . '/collections/requestToPay/initiate',
+            $this->base_url() . '/checkout/rtp/initiate',
             [
                 'timeout' => 30,
                 'headers' => [
@@ -611,28 +612,22 @@ class OneKhusa_Elementor_Checkout {
         if ($code < 200 || $code >= 300) {
             update_post_meta($post_id, 'status', 'Error');
 
-            // Keep the raw response in the order for troubleshooting, but expose a
-            // concise diagnostic to the browser while testing so we can see exactly
-            // why OneKhusa rejected the RTP request.
             $message = !empty($body['message'])
                 ? sanitize_text_field($body['message'])
                 : (!empty($body['responseMessage'])
                     ? sanitize_text_field($body['responseMessage'])
-                    : 'OneKhusa could not initiate the payment request.');
+                    : 'OneKhusa could not create the hosted checkout.');
 
             $response_code = !empty($body['responseCode'])
                 ? sanitize_text_field($body['responseCode'])
                 : (!empty($body['code']) ? sanitize_text_field($body['code']) : '');
 
-            $detail = 'OneKhusa RTP failed (HTTP ' . (int)$code . ')';
+            $detail = 'OneKhusa Hosted Checkout failed (HTTP ' . (int)$code . ')';
             if ($response_code) {
                 $detail .= ' [' . $response_code . ']';
             }
             $detail .= ': ' . $message;
 
-            // Include a compact response preview when OneKhusa did not provide a
-            // standard message/code. This is deliberately truncated to avoid dumping
-            // a large response into the public browser.
             if (!$response_code && empty($body['message']) && empty($body['responseMessage']) && $raw) {
                 $preview = sanitize_text_field(wp_strip_all_tags($raw));
                 if ($preview) {
@@ -651,43 +646,58 @@ class OneKhusa_Elementor_Checkout {
             );
         }
 
-        // Keep the merchant reference as the primary correlation value. If OneKhusa
-        // returns another transaction reference, store it too for troubleshooting/status checks.
-        $returned_reference = sanitize_text_field(
-            $body['transactionReferenceNumber']
-            ?? $body['paymentTransactionId']
-            ?? $body['transaction']['transactionReferenceNumber']
-            ?? ''
-        );
+        $checkout_url = !empty($body['checkoutUrl']) ? esc_url_raw($body['checkoutUrl']) : '';
+        $payment_transaction_id = !empty($body['paymentTransactionId'])
+            ? sanitize_text_field($body['paymentTransactionId'])
+            : '';
 
-        if ($returned_reference) {
-            update_post_meta($post_id, 'onekhusa_reference', $returned_reference);
+        if (!$checkout_url) {
+            update_post_meta($post_id, 'status', 'Error');
+            return new WP_Error(
+                'onekhusa_no_checkout_url',
+                'OneKhusa did not return a hosted checkout URL.',
+                ['status' => 502]
+            );
+        }
+
+        if ($payment_transaction_id) {
+            update_post_meta($post_id, 'payment_transaction_id', $payment_transaction_id);
         }
 
         update_post_meta($post_id, 'status', 'Pending');
 
-        $status_url = add_query_arg(
-            'onekhusa_order',
-            rawurlencode($order_id),
-            $this->success_page()
-        );
-
         return rest_ensure_response([
             'success' => true,
             'status' => 'Pending',
-            'message' => 'Payment request sent. Please check your phone and confirm the payment.',
+            'message' => 'Redirecting you to secure OneKhusa payment checkout...',
             'order_id' => $order_id,
-            'status_url' => esc_url_raw($status_url),
+            'checkout_url' => $checkout_url,
         ]);
     }
 
     private function find_order($reference) {
+        $reference = sanitize_text_field($reference);
+        if (!$reference) return 0;
+
         $posts = get_posts([
             'post_type' => self::CPT,
             'post_status' => 'publish',
             'numberposts' => 1,
-            'meta_key' => 'merchant_reference',
-            'meta_value' => $reference,
+            'meta_query' => [
+                'relation' => 'OR',
+                [
+                    'key' => 'merchant_reference',
+                    'value' => $reference,
+                ],
+                [
+                    'key' => 'onekhusa_reference_number',
+                    'value' => $reference,
+                ],
+                [
+                    'key' => 'onekhusa_reference',
+                    'value' => $reference,
+                ],
+            ],
         ]);
 
         return $posts ? $posts[0]->ID : 0;
