@@ -563,12 +563,14 @@ class OneKhusa_Elementor_Checkout {
         $idempotency_key = 'FK-' . wp_generate_uuid4();
 
         $payload = [
-            'merchantAccountNumber' => (int)$s['merchant_account'],
-            'transactionAmount' => $amount,
-            'transactionReferenceNumber' => $order_id,
-            'transactionDescription' => 'FocusKitty - ' . $product['name'] . ' x ' . $quantity,
-            'customerMobileNumber' => $phone,
-            'connectorId' => $connector_id,
+            'input' => [
+                'merchantAccountNumber' => (int)$s['merchant_account'],
+                'transactionAmount' => $amount,
+                'transactionReferenceNumber' => $order_id,
+                'transactionDescription' => 'FocusKitty - ' . $product['name'] . ' x ' . $quantity,
+                'customerMobileNumber' => $phone,
+                'connectorId' => (int)$connector_id,
+            ],
         ];
 
         update_post_meta($post_id, 'connector_id', $connector_id);
