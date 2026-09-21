@@ -501,15 +501,31 @@ class FocusKitty_PayChangu_Checkout {
 
         $data = is_array($body['data'] ?? null) ? $body['data'] : [];
         $returned_charge_id = sanitize_text_field($data['charge_id'] ?? $body['charge_id'] ?? $charge_id);
-        $payment_status = strtolower(sanitize_text_field($data['status'] ?? $body['status'] ?? 'pending'));
 
         update_post_meta($post_id, 'charge_id', $returned_charge_id);
-        update_post_meta($post_id, 'paychangu_status', $payment_status);
 
-        if (in_array($payment_status, ['success', 'successful', 'completed'], true)) {
-            update_post_meta($post_id, 'status', 'Paid');
-        } elseif (in_array($payment_status, ['failed', 'cancelled', 'canceled'], true)) {
-            update_post_meta($post_id, 'status', 'Failed');
+        /*
+         * The initialize response only starts the Direct Charge. Do not trust
+         * its status as proof that money was actually collected. PayChangu's
+         * verification endpoint is the source of truth for the final status.
+         */
+        $verification = $this->verify_charge($returned_charge_id);
+
+        if (!is_wp_error($verification)) {
+            $payment_status = $verification['status'];
+            update_post_meta($post_id, 'paychangu_status', $payment_status);
+
+            if (in_array($payment_status, ['success', 'successful', 'completed'], true)) {
+                update_post_meta($post_id, 'status', 'Paid');
+            } elseif (in_array($payment_status, ['failed', 'cancelled', 'canceled', 'reversed'], true)) {
+                update_post_meta($post_id, 'status', 'Failed');
+            } else {
+                update_post_meta($post_id, 'status', 'Pending');
+            }
+        } else {
+            $payment_status = 'pending';
+            update_post_meta($post_id, 'paychangu_status', 'pending');
+            update_post_meta($post_id, 'verification_error', $verification->get_error_message());
         }
 
         $order_url = add_query_arg('onekhusa_order', $order_ref, $this->success_page());
@@ -523,6 +539,59 @@ class FocusKitty_PayChangu_Checkout {
             'order_id' => $order_ref,
             'order_url' => $order_url,
         ]);
+    }
+
+    private function verify_charge($charge_id) {
+        $charge_id = sanitize_text_field($charge_id);
+        if (!$charge_id) {
+            return new WP_Error('paychangu_missing_charge_id', 'Missing PayChangu charge ID.');
+        }
+
+        $response = wp_remote_get(
+            $this->api_url('/mobile-money/payments/' . rawurlencode($charge_id) . '/verify'),
+            [
+                'timeout' => 20,
+                'headers' => [
+                    'Accept' => 'application/json',
+                    'Authorization' => 'Bearer ' . $this->secret_key(),
+                ],
+            ]
+        );
+
+        if (is_wp_error($response)) {
+            return new WP_Error(
+                'paychangu_verify_connection',
+                'Could not connect to PayChangu to verify the payment.'
+            );
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        $raw = wp_remote_retrieve_body($response);
+        $body = json_decode($raw, true);
+
+        if ($code < 200 || $code >= 300 || !is_array($body)) {
+            $message = is_array($body) && !empty($body['message'])
+                ? sanitize_text_field($body['message'])
+                : 'PayChangu could not verify the payment.';
+            return new WP_Error('paychangu_verify_error', $message);
+        }
+
+        /*
+         * PayChangu's verification response uses:
+         * top-level status = successful
+         * data.status      = success
+         */
+        $status = strtolower(sanitize_text_field(
+            $body['data']['status']
+            ?? $body['status']
+            ?? 'pending'
+        ));
+
+        return [
+            'status' => $status,
+            'raw' => $raw,
+            'data' => $body,
+        ];
     }
 
     private function find_order($reference) {
@@ -602,6 +671,32 @@ class FocusKitty_PayChangu_Checkout {
         if (!$id) return '<div class="okec-box"><p>Order not found.</p></div>';
 
         $status = get_post_meta($id, 'status', true) ?: 'Pending';
+
+        /*
+         * While the order is pending, verify directly with PayChangu on every
+         * status-page refresh. This means "Payment successful" is only shown
+         * after PayChangu confirms the charge, not merely after initialization.
+         */
+        if ($status === 'Pending') {
+            $charge_id_for_verification = get_post_meta($id, 'charge_id', true);
+            $verification = $this->verify_charge($charge_id_for_verification);
+
+            if (!is_wp_error($verification)) {
+                $verified_status = $verification['status'];
+                update_post_meta($id, 'paychangu_status', $verified_status);
+                update_post_meta($id, 'last_verified_at', current_time('mysql', true));
+                update_post_meta($id, 'last_verification_response', $verification['raw']);
+
+                if (in_array($verified_status, ['success', 'successful', 'completed'], true)) {
+                    $status = 'Paid';
+                    update_post_meta($id, 'status', 'Paid');
+                } elseif (in_array($verified_status, ['failed', 'cancelled', 'canceled', 'reversed'], true)) {
+                    $status = 'Failed';
+                    update_post_meta($id, 'status', 'Failed');
+                }
+            }
+        }
+
         $product = get_post_meta($id, 'product', true);
         $amount = (float)get_post_meta($id, 'amount', true);
         $charge_id = get_post_meta($id, 'charge_id', true);
