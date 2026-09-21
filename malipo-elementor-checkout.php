@@ -421,7 +421,6 @@ class OneKhusa_Elementor_Checkout {
             button.disabled = true;
 
             const fd = new FormData();
-            fd.append('nonce', '<?php echo esc_js($nonce); ?>');
             fd.append('product', box.dataset.product);
             fd.append('name', name);
             fd.append('phone', phone);
@@ -460,10 +459,10 @@ class OneKhusa_Elementor_Checkout {
     public function create_payment(WP_REST_Request $request) {
         $nonce = $request->get_param('nonce');
 
-        if (!$nonce || !wp_verify_nonce($nonce, 'okec_create_payment')) {
-            return new WP_Error('bad_nonce', 'Security check failed.', ['status' => 403]);
-        }
-
+        // This checkout is intentionally public because customers are not logged in.
+        // Do not require a WordPress login/session nonce here: cached public pages can
+        // serve a stale nonce and cause legitimate customers to see "Security check failed".
+        // Product, price and payment credentials are still validated server-side.
         $slug = sanitize_key($request->get_param('product'));
         $product = $this->product_from_slug($slug);
 
