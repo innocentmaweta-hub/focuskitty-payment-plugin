@@ -562,20 +562,26 @@ class OneKhusa_Elementor_Checkout {
 
         $idempotency_key = 'FK-' . wp_generate_uuid4();
 
+        // OneKhusa's current Request To Pay Initiate endpoint expects these
+        // fields at the JSON root. It does NOT use an "input" wrapper, customer
+        // mobile number, or connectorId on this endpoint.
+        // referenceNumber must be 5-25 alphanumeric characters.
+        $reference_number = 'FKR' . gmdate('YmdHis') . wp_rand(100, 999);
+        $captured_by = sanitize_email(get_option('admin_email'));
+
         $payload = [
-            'input' => [
-                'merchantAccountNumber' => (int)$s['merchant_account'],
-                'transactionAmount' => $amount,
-                'transactionReferenceNumber' => $order_id,
-                'transactionDescription' => 'FocusKitty - ' . $product['name'] . ' x ' . $quantity,
-                'customerMobileNumber' => $phone,
-                'connectorId' => (int)$connector_id,
-            ],
+            'merchantAccountNumber' => (int)$s['merchant_account'],
+            'transactionAmount' => $amount,
+            'transactionDescription' => 'FocusKitty - ' . $product['name'] . ' x ' . $quantity,
+            'referenceNumber' => $reference_number,
+            'capturedBy' => $captured_by,
         ];
 
         update_post_meta($post_id, 'connector_id', $connector_id);
         update_post_meta($post_id, 'network', strtolower($network));
         update_post_meta($post_id, 'idempotency_key', $idempotency_key);
+        update_post_meta($post_id, 'onekhusa_reference_number', $reference_number);
+        update_post_meta($post_id, 'captured_by', $captured_by);
 
         $response = wp_remote_post(
             $this->base_url() . '/collections/requestToPay/initiate',
