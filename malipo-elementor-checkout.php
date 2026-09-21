@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: OneKhusa Checkout for Elementor
- * Description: OneKhusa Hosted Checkout integration for Elementor/WordPress without WooCommerce.
- * Version: 2.0.0
+ * Description: OneKhusa Request To Pay mobile-money integration for Elementor/WordPress without WooCommerce.
+ * Version: 3.0.0
  * Author: Custom Integration
  */
 
@@ -72,6 +72,8 @@ class OneKhusa_Elementor_Checkout {
                     'api_secret' => sanitize_text_field($v['api_secret'] ?? ''),
                     'organisation_id' => sanitize_text_field($v['organisation_id'] ?? ''),
                     'merchant_account' => preg_replace('/[^0-9]/', '', (string)($v['merchant_account'] ?? '')),
+                    'airtel_connector_id' => absint($v['airtel_connector_id'] ?? 0),
+                    'tnm_connector_id' => absint($v['tnm_connector_id'] ?? 0),
                     'webhook_secret' => sanitize_text_field($v['webhook_secret'] ?? ''),
                     'environment' => (($v['environment'] ?? 'sandbox') === 'live') ? 'live' : 'sandbox',
                     'checkout_page' => esc_url_raw($v['checkout_page'] ?? ''),
@@ -91,11 +93,11 @@ class OneKhusa_Elementor_Checkout {
 
         ?>
         <div class="wrap">
-            <h1>OneKhusa Hosted Checkout</h1>
+            <h1>OneKhusa Request To Pay</h1>
             <p>
-                This integration uses OneKhusa's Hosted Checkout flow:
-                customer details → OneKhusa payment screen → payment → FocusKitty confirmation.
-                No WooCommerce is required.
+                Direct OneKhusa Request To Pay integration: customer enters their mobile number and network,
+                FocusKitty initiates the payment request, the customer confirms on their phone, and the webhook
+                updates the order to Paid or Failed. No WooCommerce is required.
             </p>
 
             <form method="post" action="options.php">
@@ -149,6 +151,26 @@ class OneKhusa_Elementor_Checkout {
                             <input type="text" class="regular-text" id="okec_merchant"
                                 name="<?php echo esc_attr(self::OPT); ?>[merchant_account]"
                                 value="<?php echo esc_attr($s['merchant_account'] ?? ''); ?>">
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th><label for="okec_airtel_connector_id">Airtel Money Connector ID</label></th>
+                        <td>
+                            <input type="number" min="1" class="regular-text" id="okec_airtel_connector_id"
+                                name="<?php echo esc_attr(self::OPT); ?>[airtel_connector_id]"
+                                value="<?php echo esc_attr($s['airtel_connector_id'] ?? ''); ?>">
+                            <p class="description">Enter the Airtel Money connectorId supplied by OneKhusa.</p>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <th><label for="okec_tnm_connector_id">TNM Mpamba Connector ID</label></th>
+                        <td>
+                            <input type="number" min="1" class="regular-text" id="okec_tnm_connector_id"
+                                name="<?php echo esc_attr(self::OPT); ?>[tnm_connector_id]"
+                                value="<?php echo esc_attr($s['tnm_connector_id'] ?? ''); ?>">
+                            <p class="description">Enter the TNM Mpamba connectorId supplied by OneKhusa.</p>
                         </td>
                     </tr>
 
@@ -210,6 +232,7 @@ class OneKhusa_Elementor_Checkout {
             <p><strong>Product page:</strong> <code>[onekhusa_buy product="tummy-tonic"]</code></p>
             <p><strong>Checkout page:</strong> <code>[onekhusa_checkout]</code></p>
             <p><strong>Success/status page:</strong> <code>[onekhusa_order_status]</code></p>
+            <p><strong>Payment flow:</strong> Phone + mobile network → Request To Pay → customer confirms on phone → webhook → Paid/Failed.</p>
 
             <h2>OneKhusa Webhook URL</h2>
             <p><code><?php echo esc_html($webhook); ?></code></p>
@@ -227,7 +250,7 @@ class OneKhusa_Elementor_Checkout {
         wp_add_inline_style('okec-style', '
             .okec-box{max-width:520px;padding:24px;border:1px solid #ddd;border-radius:12px;background:#fff;box-sizing:border-box}
             .okec-box label{display:block;margin:0 0 6px;font-weight:600}
-            .okec-box input{width:100%;padding:11px;margin:0 0 14px;box-sizing:border-box}
+            .okec-box input,.okec-box select{width:100%;padding:11px;margin:0 0 14px;box-sizing:border-box}
             .okec-buy,.okec-submit{width:100%;padding:13px;border:0;border-radius:8px;background:#111;color:#fff;font-weight:700;cursor:pointer}
             .okec-buy[disabled],.okec-submit[disabled]{opacity:.6;cursor:wait}
             .okec-msg{margin-top:12px}.okec-error{color:#b00020}.okec-success{color:#087f23}
@@ -372,8 +395,6 @@ class OneKhusa_Elementor_Checkout {
             return '<div class="okec-box"><p>Product not found or not configured.</p></div>';
         }
 
-        $nonce = wp_create_nonce('okec_create_payment');
-
         ob_start();
         ?>
         <div class="okec-box" data-product="<?php echo esc_attr($product['slug']); ?>">
@@ -387,6 +408,13 @@ class OneKhusa_Elementor_Checkout {
 
             <label for="okec-phone">Phone number</label>
             <input id="okec-phone" type="tel" class="okec-phone" autocomplete="tel" placeholder="265XXXXXXXXX" required>
+
+            <label for="okec-network">Mobile network</label>
+            <select id="okec-network" class="okec-network" required>
+                <option value="">Select mobile network</option>
+                <option value="airtel">Airtel Money</option>
+                <option value="tnm">TNM Mpamba</option>
+            </select>
 
             <label for="okec-address">Delivery address</label>
             <input id="okec-address" type="text" class="okec-address" autocomplete="street-address" required>
@@ -407,16 +435,17 @@ class OneKhusa_Elementor_Checkout {
             const msg = box.querySelector('.okec-msg');
             const name = box.querySelector('.okec-name').value.trim();
             const phone = box.querySelector('.okec-phone').value.trim();
+            const network = box.querySelector('.okec-network').value;
             const address = box.querySelector('.okec-address').value.trim();
             const quantity = parseInt(box.querySelector('.okec-quantity').value, 10);
 
-            if(!name || !phone || !address || !quantity || quantity < 1 || quantity > 20){
+            if(!name || !phone || !network || !address || !quantity || quantity < 1 || quantity > 20){
                 msg.textContent = 'Please complete all fields correctly.';
                 msg.className = 'okec-msg okec-error';
                 return;
             }
 
-            msg.textContent = 'Preparing secure OneKhusa payment...';
+            msg.textContent = 'Sending payment request to your phone...';
             msg.className = 'okec-msg';
             button.disabled = true;
 
@@ -424,6 +453,7 @@ class OneKhusa_Elementor_Checkout {
             fd.append('product', box.dataset.product);
             fd.append('name', name);
             fd.append('phone', phone);
+            fd.append('network', network);
             fd.append('address', address);
             fd.append('quantity', quantity);
 
@@ -434,16 +464,19 @@ class OneKhusa_Elementor_Checkout {
             }).then(async r => {
                 const data = await r.json();
 
-                if (!r.ok) {
-                    throw new Error(data.message || 'Could not create payment.');
+                if(!r.ok){
+                    throw new Error(data.message || 'Could not start the payment request.');
                 }
 
-                if(data.payment_link){
-                    window.location.href = data.payment_link;
-                    return;
-                }
+                msg.textContent = data.message || 'Payment request sent. Please check your phone and confirm the payment.';
+                msg.className = 'okec-msg okec-success';
 
-                throw new Error(data.message || 'OneKhusa did not return a checkout link.');
+                button.textContent = 'Payment Request Sent';
+                button.disabled = true;
+
+                if(data.status_url){
+                    window.setTimeout(function(){ window.location.href = data.status_url; }, 2500);
+                }
             }).catch(err => {
                 msg.textContent = err.message;
                 msg.className = 'okec-msg okec-error';
@@ -469,9 +502,10 @@ class OneKhusa_Elementor_Checkout {
         $name = sanitize_text_field($request->get_param('name'));
         $phone = preg_replace('/[^0-9+]/', '', (string)$request->get_param('phone'));
         $address = sanitize_text_field($request->get_param('address'));
+        $network = sanitize_key($request->get_param('network'));
         $quantity = max(1, min(20, absint($request->get_param('quantity'))));
 
-        if (!$product || !$name || !$phone || !$address || $quantity < 1) {
+        if (!$product || !$name || !$phone || !$network || !$address || $quantity < 1) {
             return new WP_Error('missing_fields', 'Please complete all fields.', ['status' => 400]);
         }
 
@@ -510,48 +544,39 @@ class OneKhusa_Elementor_Checkout {
         update_post_meta($post_id, 'delivery_address', $address);
         update_post_meta($post_id, 'status', 'Pending');
 
-        $success = add_query_arg(
-            'onekhusa_order',
-            rawurlencode($order_id),
-            $this->success_page()
-        );
+        $connector_id = 0;
+        if (strtolower($network) === 'airtel') {
+            $connector_id = absint($s['airtel_connector_id'] ?? 0);
+        } elseif (strtolower($network) === 'tnm') {
+            $connector_id = absint($s['tnm_connector_id'] ?? 0);
+        }
 
-        $failure = add_query_arg(
-            [
-                'onekhusa_order' => rawurlencode($order_id),
-                'payment_failed' => '1',
-            ],
-            $this->success_page()
-        );
-
-        $site_base = home_url('/');
-        $webhook = rest_url('onekhusa/v1/webhook');
-
-        $payload = [
-            'authentication' => [
-                'apiKey' => $s['api_key'],
-                'apiSecret' => $s['api_secret'],
-            ],
-            'merchant' => [
-                'organisationId' => $s['organisation_id'],
-                'merchantAccountNumber' => (int)$s['merchant_account'],
-            ],
-            'payment' => [
-                'sourceReferenceNumber' => $order_id,
-                'description' => 'FocusKitty - ' . $product['name'] . ' x ' . $quantity,
-                'amount' => $amount,
-            ],
-            'route' => [
-                'successRedirectionUrl' => $success,
-                'failureRedirectionUrl' => $failure,
-                'callbackApiUrl' => $webhook,
-            ],
-        ];
+        if (!$connector_id) {
+            update_post_meta($post_id, 'status', 'Error');
+            return new WP_Error(
+                'onekhusa_connector',
+                'The selected mobile network connector is not configured.',
+                ['status' => 500]
+            );
+        }
 
         $idempotency_key = 'FK-' . wp_generate_uuid4();
 
+        $payload = [
+            'merchantAccountNumber' => (int)$s['merchant_account'],
+            'transactionAmount' => $amount,
+            'transactionReferenceNumber' => $order_id,
+            'transactionDescription' => 'FocusKitty - ' . $product['name'] . ' x ' . $quantity,
+            'customerMobileNumber' => $phone,
+            'connectorId' => $connector_id,
+        ];
+
+        update_post_meta($post_id, 'connector_id', $connector_id);
+        update_post_meta($post_id, 'network', strtolower($network));
+        update_post_meta($post_id, 'idempotency_key', $idempotency_key);
+
         $response = wp_remote_post(
-            $this->base_url() . '/checkout/rtp/initiate',
+            $this->base_url() . '/collections/requestToPay/initiate',
             [
                 'timeout' => 30,
                 'headers' => [
@@ -570,34 +595,48 @@ class OneKhusa_Elementor_Checkout {
         }
 
         $code = wp_remote_retrieve_response_code($response);
-        $body = json_decode(wp_remote_retrieve_body($response), true);
+        $raw = wp_remote_retrieve_body($response);
+        $body = json_decode($raw, true);
 
-        if ($code < 200 || $code >= 300 || empty($body['paymentTransactionId'])) {
+        update_post_meta($post_id, 'initiation_response', $raw);
+
+        if ($code < 200 || $code >= 300) {
             update_post_meta($post_id, 'status', 'Error');
 
             $message = !empty($body['message'])
                 ? sanitize_text_field($body['message'])
-                : 'OneKhusa did not return a payment transaction ID.';
+                : 'OneKhusa could not initiate the payment request.';
 
             return new WP_Error('onekhusa_error', $message, ['status' => 502]);
         }
 
-        $payment_transaction_id = sanitize_text_field($body['paymentTransactionId']);
-
-        update_post_meta($post_id, 'payment_transaction_id', $payment_transaction_id);
-        update_post_meta($post_id, 'idempotency_key', $idempotency_key);
-
-        $payment_link = add_query_arg(
-            'ptid',
-            rawurlencode($payment_transaction_id),
-            'https://checkout.onekhusa.com/requestToPay/initiate'
+        // Keep the merchant reference as the primary correlation value. If OneKhusa
+        // returns another transaction reference, store it too for troubleshooting/status checks.
+        $returned_reference = sanitize_text_field(
+            $body['transactionReferenceNumber']
+            ?? $body['paymentTransactionId']
+            ?? $body['transaction']['transactionReferenceNumber']
+            ?? ''
         );
 
-        update_post_meta($post_id, 'payment_link', esc_url_raw($payment_link));
+        if ($returned_reference) {
+            update_post_meta($post_id, 'onekhusa_reference', $returned_reference);
+        }
+
+        update_post_meta($post_id, 'status', 'Pending');
+
+        $status_url = add_query_arg(
+            'onekhusa_order',
+            rawurlencode($order_id),
+            $this->success_page()
+        );
 
         return rest_ensure_response([
-            'payment_link' => esc_url_raw($payment_link),
+            'success' => true,
+            'status' => 'Pending',
+            'message' => 'Payment request sent. Please check your phone and confirm the payment.',
             'order_id' => $order_id,
+            'status_url' => esc_url_raw($status_url),
         ]);
     }
 
@@ -665,7 +704,7 @@ class OneKhusa_Elementor_Checkout {
         }
 
         $status_code = strtoupper(sanitize_text_field(
-            $data['transactionStatusCode'] ?? $data['status'] ?? ''
+            $data['transactionStatusCode'] ?? $data['status'] ?? $data['transaction']['transactionStatusCode'] ?? ''
         ));
 
         $is_success = in_array($event, ['payment.success', 'payrequest.success'], true)
@@ -688,12 +727,20 @@ class OneKhusa_Elementor_Checkout {
             ?? ''
         );
 
+        if (!$transaction_ref) {
+            $transaction_ref = sanitize_text_field(
+                $data['transaction']['transactionReferenceNumber'] ?? ''
+            );
+        }
+
         if ($transaction_ref) {
             update_post_meta($id, 'transaction_reference', $transaction_ref);
         }
 
         if (isset($data['transactionAmount'])) {
             update_post_meta($id, 'confirmed_amount', (float)$data['transactionAmount']);
+        } elseif (isset($data['transaction']['transactionAmount'])) {
+            update_post_meta($id, 'confirmed_amount', (float)$data['transaction']['transactionAmount']);
         }
 
         update_post_meta($id, 'webhook_event', $event);
